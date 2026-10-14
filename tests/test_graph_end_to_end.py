@@ -139,6 +139,66 @@ def test_a_full_run_reaches_a_logged_decision(tmp_path, monkeypatch, offline, st
 
 
 @pytest.mark.unit
+def test_scoped_daily_context_survives_the_full_graph(tmp_path, monkeypatch, offline):
+    graph = _graph(tmp_path, monkeypatch, ScriptedModel(structured=True))
+    original_signature = graph._run_signature("stock")
+    graph.analysis_context = {
+        "all": "Forecast today's regular close.",
+        "market": "Candidate: check interval calibration.",
+        "decision": "Candidate: distinguish daily direction from investment rating.",
+    }
+    assert graph._run_signature("stock") != original_signature
+    state, signal = graph.propagate("NVDA", TRADE_DATE)
+    assert signal == "Overweight"
+    assert state["analysis_context"] == graph.analysis_context
+    assert "check interval" in context.get_instrument_context_from_state(state, "market")
+    assert "investment rating" in context.get_instrument_context_from_state(state)
+
+
+@pytest.mark.unit
+def test_daily_cycle_with_the_real_graph_and_scripted_providers(tmp_path, monkeypatch, offline):
+    from datetime import datetime, timezone
+
+    from tradingagents.daily import runner
+    from tradingagents.daily.market import TradingCalendar
+    from tradingagents.daily.models import DailyForecast, DailyReflection
+    from tradingagents.daily.store import DailyStore
+
+    model = ScriptedModel(structured=True)
+    monkeypatch.setitem(STRUCTURED, DailyForecast, DailyForecast(
+        close=102, low=98, high=105, up_probability=0.7, rationale="r", risks="uncertain",
+    ))
+    monkeypatch.setitem(STRUCTURED, DailyReflection, DailyReflection(
+        analysis="The close matched the direction, but causality is unknown.",
+        candidate=None, evaluations=[],
+    ))
+    monkeypatch.setattr(trading_graph, "create_llm_client", lambda **k: _Client(model))
+    monkeypatch.setattr(runner, "create_llm_client", lambda **k: _Client(model))
+    monkeypatch.setattr(runner, "fetch_bars", lambda *args: {
+        "2026-01-08": {"date": "2026-01-08", "close": 100, "split": 0},
+        TRADE_DATE: {"date": TRADE_DATE, "close": 101, "split": 0},
+    })
+    now = [datetime(2026, 1, 9, 13, 30, tzinfo=timezone.utc)]
+    config = copy.deepcopy(DEFAULT_CONFIG)
+    legacy_log = tmp_path / "legacy.md"
+    config.update(data_cache_dir=str(tmp_path / "cache"), memory_log_path=str(legacy_log))
+    store = DailyStore(tmp_path / "daily.sqlite3")
+    service = runner.DailyRunner(config, store, TradingCalendar(), clock=lambda: now[0])
+
+    assert service.tick("NVDA")[1] == []
+    prediction = store.records("NVDA")[0]
+    assert prediction["eligible"] and prediction["reports"]["final_trade_decision"]
+    assert prediction["forecast"]["close"] == 102
+    assert not legacy_log.exists()
+
+    now[0] = datetime(2026, 1, 9, 21, 30, tzinfo=timezone.utc)
+    assert service.tick("NVDA")[1] == []
+    record = store.records("NVDA")[0]
+    assert record["outcome"]["scores"]["absolute_error"] == 1
+    assert record["reflection"]["analysis"]
+
+
+@pytest.mark.unit
 def test_an_interrupted_run_resumes_from_its_checkpoint(tmp_path, monkeypatch, offline):
     model = ScriptedModel(fail_at=12)            # past the analysts, before the decision
     graph = _graph(tmp_path, monkeypatch, model, checkpoint_enabled=True)

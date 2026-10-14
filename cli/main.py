@@ -2,6 +2,7 @@ import sys
 
 import typer
 
+from cli.daily import app as daily_app
 from cli.display import console
 from cli.run import run_analysis
 from tradingagents.backtest import iter_grid, run_backtest, summarize
@@ -25,6 +26,7 @@ app = typer.Typer(
     help="TradingAgents CLI: Multi-Agents LLM Financial Trading Framework",
     add_completion=True,  # Enable shell completion
 )
+app.add_typer(daily_app, name="daily")
 
 
 @app.callback(invoke_without_command=True)

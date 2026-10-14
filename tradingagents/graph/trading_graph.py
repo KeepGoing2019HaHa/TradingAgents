@@ -1,3 +1,4 @@
+import hashlib
 import json
 import logging
 import os
@@ -49,6 +50,7 @@ class TradingAgentsGraph:
         debug=False,
         config: dict[str, Any] = None,
         callbacks: list | None = None,
+        analysis_context: dict[str, str] | None = None,
     ):
         """Initialize the trading agents graph and components.
 
@@ -57,10 +59,12 @@ class TradingAgentsGraph:
             debug: Whether to run in debug mode
             config: Configuration dictionary. If None, uses default config
             callbacks: Optional list of callback handlers (e.g., for tracking LLM/tool stats)
+            analysis_context: Optional common ("all") and role-specific instructions/lessons
         """
         self.debug = debug
         self.config = config or DEFAULT_CONFIG
         self.callbacks = callbacks or []
+        self.analysis_context = analysis_context or {}
 
         set_config(self.config)
 
@@ -145,7 +149,7 @@ class TradingAgentsGraph:
         selection, debate/risk depth, or asset mode starts fresh instead of
         silently continuing the previous graph (#1089).
         """
-        return "|".join([
+        signature = "|".join([
             "analysts=" + ",".join(self.selected_analysts),
             f"debate={self.config['max_debate_rounds']}",
             f"risk={self.config['max_risk_discuss_rounds']}",
@@ -153,6 +157,11 @@ class TradingAgentsGraph:
             # None, an empty book and a changed book are three different runs.
             f"portfolio={portfolio.fingerprint() if portfolio is not None else 'none'}",
         ])
+        if context := getattr(self, "analysis_context", None):
+            signature += "|context=" + hashlib.sha256(
+                json.dumps(context, sort_keys=True).encode()
+            ).hexdigest()
+        return signature
 
     def propagate(self, company_name, trade_date, asset_type: str = "stock", portfolio=None):
         """Run the trading agents graph for a company on a specific date.
@@ -275,6 +284,7 @@ class TradingAgentsGraph:
             ),
             instrument_context=self.resolve_instrument_context(company_name, asset_type, trade_date),
             portfolio_context=portfolio.render(company_name) if portfolio is not None else "",
+            analysis_context=getattr(self, "analysis_context", None),
         )
 
     def settle_pending(self, company_name):

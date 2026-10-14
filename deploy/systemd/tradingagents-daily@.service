@@ -1,0 +1,13 @@
+[Unit]
+Description=TradingAgents daily forecast and reflection for %i
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/TradingAgents
+ExecStart=%h/TradingAgents/.venv/bin/python -m cli.main daily tick %i
+TimeoutStartSec=3h
+UMask=0077
+StandardOutput=journal
+StandardError=journal

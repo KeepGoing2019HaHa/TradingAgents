@@ -159,7 +159,7 @@ def build_instrument_context(
     return context
 
 
-def get_instrument_context_from_state(state: Mapping[str, Any]) -> str:
+def get_instrument_context_from_state(state: Mapping[str, Any], role: str = "decision") -> str:
     """Return the instrument context for the current run.
 
     Prefers the identity-resolved context computed once at run start and
@@ -169,12 +169,13 @@ def get_instrument_context_from_state(state: Mapping[str, Any]) -> str:
     consumer is never forced to make a yfinance call mid-graph.
     """
     context = state.get("instrument_context")
-    if isinstance(context, str) and context.strip():
-        return context
-    return build_instrument_context(
-        str(state["company_of_interest"]),
-        state.get("asset_type", "stock"),
-    )
+    if not isinstance(context, str) or not context.strip():
+        context = build_instrument_context(
+            str(state["company_of_interest"]),
+            state.get("asset_type", "stock"),
+        )
+    scoped = state.get("analysis_context", {})
+    return "\n\n".join(part for part in (context, scoped.get("all", ""), scoped.get(role, "")) if part)
 
 
 def report_or_absent(text: str, source: str) -> str:
@@ -233,6 +234,5 @@ def create_msg_delete():
         return {"messages": removal_operations + [placeholder]}
 
     return delete_messages
-
 
 

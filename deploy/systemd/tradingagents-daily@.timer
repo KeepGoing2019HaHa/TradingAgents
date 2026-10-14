@@ -1,0 +1,11 @@
+[Unit]
+Description=Check TradingAgents jobs for %i every five minutes
+
+[Timer]
+OnCalendar=*-*-* *:0/5:00
+Persistent=true
+RandomizedDelaySec=10
+Unit=tradingagents-daily@%i.service
+
+[Install]
+WantedBy=timers.target

@@ -330,6 +330,37 @@ _, decision = ta.propagate("NVDA", "2026-09-01")
 
 ## Evaluating decisions over time
 
+### Daily premarket forecasts and postmarket learning
+
+The separate `daily` workflow forecasts a US stock's **same-session regular close**,
+freezes the forecast before the open, scores it after the close, and supplies prior
+conditional lessons to the next run's analysts, researchers, trader and risk team.
+It does not replace the multi-day investment decision log or place orders.
+
+```bash
+# Inspect the exchange calendar without contacting data or model providers:
+tradingagents daily tick NVDA --dry-run
+
+# Run only due jobs; repeat every five minutes using the supplied systemd timer:
+tradingagents daily tick NVDA
+
+# Read metrics and sample counts locally:
+tradingagents daily report NVDA
+tradingagents daily report NVDA --json
+```
+
+Defaults: NASDAQ calendar, 60 minutes before opening, 30 minutes after closing,
+Chinese analysis/reflection, and `~/.tradingagents/daily/daily.sqlite3`.
+NASDAQ/NYSE holidays, early closes and US daylight saving are calendar-driven.
+Late forecasts are retained but excluded; missing prices stay pending and failures
+exit nonzero for retry. Historical forecasts cannot be backfilled.
+
+See [daily workflow and deployment](docs/daily-workflow.md) for scheduling, scoring,
+no-memory controls, experience validation, and limitations. Memory is not model
+training and does not guarantee increasing accuracy.
+
+### Multi-day investment decisions
+
 One run gives one decision, which cannot tell you whether the system decides well. `run_backtest` runs the same pipeline over a grid of tickers and dates, writes to a decision log of its own, and scores the decisions whose holding window has since traded.
 
 ```python
