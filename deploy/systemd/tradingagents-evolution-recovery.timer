@@ -1,0 +1,10 @@
+[Unit]
+Description=Check MSFT RSI retry cooldowns and saved progress every fifteen minutes
+
+[Timer]
+OnCalendar=*-*-* *:00/15:00
+Persistent=true
+Unit=tradingagents-evolution-recovery.service
+
+[Install]
+WantedBy=timers.target

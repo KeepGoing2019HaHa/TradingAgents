@@ -8,6 +8,7 @@ from tradingagents.agents.tools import (
     get_income_statement,
     get_insider_transactions,
 )
+from tradingagents.evolution.replay import selected_tools
 
 # The tools this analyst is offered; its tool node is built from the same tuple.
 TOOLS = (
@@ -49,11 +50,12 @@ def create_fundamentals_analyst(llm):
         )
 
         prompt = prompt.partial(system_message=system_message)
-        prompt = prompt.partial(tool_names=", ".join([tool.name for tool in TOOLS]))
+        tools = selected_tools(TOOLS)
+        prompt = prompt.partial(tool_names=", ".join([tool.name for tool in tools]))
         prompt = prompt.partial(current_date=current_date)
         prompt = prompt.partial(instrument_context=instrument_context)
 
-        chain = prompt | llm.bind_tools(TOOLS)
+        chain = prompt | llm.bind_tools(tools)
 
         result = chain.invoke(state["messages"])
 

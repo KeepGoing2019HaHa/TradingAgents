@@ -216,6 +216,39 @@ def test_an_interrupted_run_resumes_from_its_checkpoint(tmp_path, monkeypatch, o
     assert resumed_calls == len(full_run.calls) - (model.fail_at - 1)
 
 
+def test_evolution_real_graph_uses_no_live_data_or_historical_memory(tmp_path, monkeypatch):
+    from tradingagents.agents import tools
+    from tradingagents.daily.models import DailyForecast
+    from tradingagents.decision_log import TradingMemoryLog
+    from tradingagents.evolution.engine import BASE_PROMPT, Strategy, forecast
+    from tradingagents.evolution.replay import TOOL_NAMES
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Replay accessed a live data provider")
+
+    original_load = TradingMemoryLog.load_entries
+
+    def load_entries(log):
+        assert log._log_path is None
+        return original_load(log)
+
+    model = ScriptedModel(structured=True)
+    monkeypatch.setattr(trading_graph, "create_llm_client", lambda **kwargs: _Client(model))
+    monkeypatch.setattr(TradingMemoryLog, "load_entries", load_entries)
+    monkeypatch.setattr(tools, "route_to_vendor", forbidden)
+    monkeypatch.setattr(tools, "build_verified_market_snapshot", forbidden)
+    monkeypatch.setattr(trading_graph, "resolve_instrument_identity", forbidden)
+    monkeypatch.setitem(STRUCTURED, DailyForecast, DailyForecast(
+        close=102, low=98, high=105, up_probability=0.7, rationale="frozen-only", risks="uncertain"))
+    inputs = {"schema": 1, "ticker": "MSFT", "day": TRADE_DATE,
+              "captured_at": TRADE_DATE + "T12:00:00+00:00", "cutoff": TRADE_DATE + "T14:30:00+00:00",
+              "reference": {"close": 100}, "tools": {name: {"output": "archived"} for name in TOOL_NAMES}}
+    strategy = Strategy(quick_model="test", deep_model="test", prompt=BASE_PROMPT, tools=list(TOOL_NAMES))
+    result, reports = forecast(strategy, inputs, {**DEFAULT_CONFIG, "memory_log_path": "/forbidden/memory.md"}, tmp_path)
+    assert result.close == 102 and reports["market_report"]
+    assert not (tmp_path / "checkpoints").exists()
+
+
 @pytest.mark.unit
 def test_a_graph_reused_across_runs_keeps_no_run_state(tmp_path, monkeypatch, offline):
     """A backtest reuses one graph over its whole grid; holding every run's full

@@ -140,6 +140,36 @@ def test_complete_daily_cycle_is_frozen_scored_and_read_before_next_analysis(wor
     assert len(w.store.records("NVDA")[1]["lessons"]) == 1
 
 
+def test_msft_evolution_uses_frozen_evidence_without_memory_and_labels_after_close(workflow, monkeypatch):
+    from tradingagents.evolution import engine
+    from tradingagents.evolution.store import EvolutionStore
+
+    w = workflow
+    w.service.config["msft_evolution_enabled"] = True
+    observed = []
+
+    def capture(session, reference, config, clock):
+        return {"schema": 1, "ticker": "MSFT", "day": session.day, "reference": reference,
+                "captured_at": timestamp(clock()), "cutoff": timestamp(session.open), "tools": {}}
+
+    def forecast(strategy, inputs, config, directory):
+        observed.append(inputs)
+        return FORECAST, {"market_report": "frozen-only"}
+
+    monkeypatch.setattr(engine, "capture", capture)
+    monkeypatch.setattr(engine, "forecast", forecast)
+    assert w.service.tick("MSFT")[1] == []
+    record = w.store.records("MSFT")[0]
+    assert record["evolution"]["version"] and record["lessons"] == []
+    assert "lessons" not in observed[0] and "target" not in observed[0]
+    assert not w.graphs
+    w.now[0] = at("2026-10-01T20:31:00")
+    assert w.service.tick("MSFT")[1] == []
+    sample = EvolutionStore(w.store.path.with_name("evolution.sqlite3")).samples()[0]
+    assert sample["target"]["close"] == 101
+    assert sample["input_hash"] == record["evolution"]["input_hash"]
+
+
 def test_late_analysis_is_persisted_but_never_scored_or_learned(workflow, monkeypatch):
     w = workflow
     original = w.graph_type.propagate

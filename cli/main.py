@@ -4,6 +4,7 @@ import typer
 
 from cli.daily import app as daily_app
 from cli.display import console
+from cli.evolution import app as evolution_app
 from cli.run import run_analysis
 from tradingagents.backtest import iter_grid, run_backtest, summarize
 from tradingagents.default_config import DEFAULT_CONFIG
@@ -27,6 +28,7 @@ app = typer.Typer(
     add_completion=True,  # Enable shell completion
 )
 app.add_typer(daily_app, name="daily")
+app.add_typer(evolution_app, name="evolution")
 
 
 @app.callback(invoke_without_command=True)

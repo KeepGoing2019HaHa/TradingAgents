@@ -1,7 +1,8 @@
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from tradingagents.agents.analysts import fundamentals_analyst, market_analyst, news_analyst
+from tradingagents.evolution.replay import selected_tools
 
 
 @dataclass(frozen=True)
@@ -64,7 +65,7 @@ def build_analyst_execution_plan(
         spec = ANALYST_NODE_SPECS.get(analyst_key)
         if spec is None:
             raise ValueError(f"unknown analyst key: {analyst_key}")
-        specs.append(spec)
+        specs.append(replace(spec, tools=selected_tools(spec.tools)))
 
     if not specs:
         raise ValueError("at least one analyst must be selected")

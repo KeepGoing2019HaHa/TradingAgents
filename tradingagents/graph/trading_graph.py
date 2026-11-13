@@ -66,7 +66,7 @@ class TradingAgentsGraph:
         self.callbacks = callbacks or []
         self.analysis_context = analysis_context or {}
 
-        set_config(self.config)
+        set_config({**self.config, "evolution_inputs": None, "evolution_policy": None})
 
         os.makedirs(self.config["data_cache_dir"], exist_ok=True)
         os.makedirs(self.config["results_dir"], exist_ok=True)
@@ -113,7 +113,8 @@ class TradingAgentsGraph:
         self.selected_analysts = tuple(selected_analysts)
 
         # Set up the graph: keep the workflow for recompilation with a checkpointer.
-        self.workflow = self.graph_setup.setup_graph(selected_analysts)
+        with run_config(self.config):
+            self.workflow = self.graph_setup.setup_graph(selected_analysts)
         self.graph = self.workflow.compile()
         self._checkpointer_ctx = None
         self._resuming = False
@@ -128,6 +129,10 @@ class TradingAgentsGraph:
         path and the CLI call this so the resolved identity reaches the whole
         graph regardless of entry point.
         """
+        if self.config.get("evolution_inputs") is not None:
+            if ticker != "MSFT":
+                raise ValueError("Frozen evolution only supports MSFT")
+            return "MSFT is Microsoft Corporation, a US equity quoted in USD on NASDAQ."
         identity = resolve_instrument_identity(ticker)
         return build_instrument_context(ticker, asset_type, identity, curr_date)
 

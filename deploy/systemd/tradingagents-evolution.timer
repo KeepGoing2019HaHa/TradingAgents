@@ -1,0 +1,10 @@
+[Unit]
+Description=Run MSFT evolution once daily after the US market closes
+
+[Timer]
+OnCalendar=*-*-* 21:15:00 America/New_York
+Persistent=true
+Unit=tradingagents-evolution.service
+
+[Install]
+WantedBy=timers.target

@@ -6,12 +6,17 @@ and never serves data past it, whatever date the model asks for.
 
 from typing import Annotated
 
-from langchain_core.tools import tool
+from langchain_core.tools import tool as langchain_tool
 from langgraph.prebuilt import InjectedState
 
 from tradingagents.dataflows.date_window import as_of, as_of_window
 from tradingagents.dataflows.router import route_to_vendor
 from tradingagents.dataflows.vendors.yahoo.snapshot import build_verified_market_snapshot
+from tradingagents.evolution.replay import frozen_tool
+
+
+def tool(function):
+    return langchain_tool(frozen_tool(function))
 
 
 @tool

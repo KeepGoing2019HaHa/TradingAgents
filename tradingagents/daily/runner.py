@@ -167,6 +167,8 @@ class DailyRunner:
         started = self.clock()
         if not session.open - self.lead <= started < session.open:
             raise ValueError("Not in the live premarket window; refusing a retrospective forecast")
+        if ticker == "MSFT" and self.config.get("msft_evolution_enabled"):
+            return self.predict_evolution(session, variant, started)
         previous = self.calendar.previous(session)
         reference = exact_bar(fetch_bars(ticker, previous.day, previous.day), ticker, previous.day)
         # Both variants use the same frozen reference, even if the vendor later revises it.
@@ -224,6 +226,50 @@ class DailyRunner:
         logger.info("Frozen %s %s %s (eligible=%s)", ticker, session.day, variant, record["eligible"])
         return record
 
+    def predict_evolution(self, session: Session, variant: str, started: datetime) -> dict:
+        from tradingagents.evolution.engine import (
+            Strategy,
+            baseline,
+            capture,
+            execution_signature,
+            forecast,
+        )
+        from tradingagents.evolution.store import EvolutionStore
+
+        if variant != "memory":
+            raise ValueError("Use the RSI paired evaluator instead of daily --control for MSFT evolution")
+        store = EvolutionStore(self.store.path.with_name("evolution.sqlite3"))
+        previous = self.calendar.previous(session)
+        with store.lock():
+            champion = baseline(self.config, store, timestamp(started))
+            sample = next((item for item in store.samples() if item["inputs"]["day"] == session.day), None)
+            if sample:
+                inputs, checksum = sample["inputs"], sample["input_hash"]
+            else:
+                reference = exact_bar(fetch_bars("MSFT", previous.day, previous.day), "MSFT", previous.day)
+                inputs = capture(session, reference, self.config, self.clock)
+                checksum = store.freeze(inputs)
+            strategy = Strategy.model_validate(champion["strategy"])
+            run_dir = self.store.path.parent / "runs" / "MSFT" / session.day / variant
+            prediction, reports = forecast(strategy, inputs, self.config, run_dir)
+        completed = self.clock()
+        settings = {"prompt_version": "msft-rsi-v1", "calendar": self.calendar.exchange,
+                    "strategy_version": champion["id"], "strategy": strategy.model_dump(),
+                    "llm_provider": self.config["llm_provider"],
+                    "execution_signature": execution_signature(self.config)}
+        return self.store.freeze({
+            "ticker": "MSFT", "day": session.day, "variant": variant,
+            "started_at": timestamp(started), "data_as_of": inputs["captured_at"],
+            "created_at": timestamp(completed), "eligible": completed < session.open,
+            "session": session.payload(), "reference": inputs["reference"],
+            "reference_at": timestamp(previous.close),
+            "settle_after": timestamp(session.close + self.delay),
+            "forecast": prediction.model_dump(), "lessons": [], "reports": reports,
+            "settings": settings,
+            "signature": hashlib.sha256(json.dumps(settings, sort_keys=True).encode()).hexdigest()[:16],
+            "evolution": {"version": champion["id"], "input_hash": checksum},
+        })
+
     def settle(self, record: dict):
         if not record["eligible"] or self.clock() < datetime.fromisoformat(record["settle_after"]):
             return
@@ -247,6 +293,12 @@ class DailyRunner:
                 ),
             }
             self.store.save_outcome(record["id"], outcome, self.clock())
+        if record.get("evolution") and not outcome["excluded"]:
+            from tradingagents.evolution.store import EvolutionStore
+
+            EvolutionStore(self.store.path.with_name("evolution.sqlite3")).label(
+                record["day"], {"close": outcome["bar"]["close"], "available_at": outcome["fetched_at"]}
+            )
         if outcome["excluded"] or record["variant"] == "control" or record["reflection"]:
             return
         if self._reflection_llm is None:

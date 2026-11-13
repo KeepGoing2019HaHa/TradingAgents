@@ -29,16 +29,19 @@ def tick(
     lead_minutes: int = typer.Option(60, "--lead-minutes", min=5, max=240),
     delay_minutes: int = typer.Option(30, "--delay-minutes", min=15, max=240),
     control: bool = typer.Option(False, "--control", help="Also run a separate no-memory graph; adds LLM cost"),
+    evolution: bool = typer.Option(False, "--evolution", help="MSFT only: archive evidence and use the RSI champion"),
     language: str = typer.Option("Simplified Chinese", "--language"),
     dry_run: bool = typer.Option(False, "--dry-run", help="Show schedule; no market-data or LLM calls"),
 ):
     """Run only due work, safely repeatable by a five-minute system timer."""
     try:
         ticker = us_ticker(ticker)
+        if evolution and (ticker != "MSFT" or control):
+            raise ValueError("--evolution requires MSFT and cannot be combined with --control")
         store = DailyStore(database)
         schedule = TradingCalendar(calendar)
         runner = DailyRunner(
-            {**DEFAULT_CONFIG, "output_language": language}, store, schedule,
+            {**DEFAULT_CONFIG, "output_language": language, "msft_evolution_enabled": evolution}, store, schedule,
             lead_minutes=lead_minutes, delay_minutes=delay_minutes, control=control,
         )
         if dry_run:

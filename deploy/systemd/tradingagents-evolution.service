@@ -1,0 +1,12 @@
+[Unit]
+Description=MSFT daily RSI evolution and paired backtest
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/TradingAgents
+Environment=PYTHONUNBUFFERED=1
+ExecStart=%h/TradingAgents/.venv/bin/python -m cli.main evolution tick
+TimeoutStartSec=4h
+UMask=0077

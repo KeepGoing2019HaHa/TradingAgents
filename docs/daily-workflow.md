@@ -1,5 +1,9 @@
 # Daily forecasts and learning
 
+For the opt-in MSFT-only model/prompt/tool evolution workflow, aligned replay
+datasets, daily Git branches and miniapp evolution history, see
+[MSFT strategy evolution](msft-evolution.md). Enable it with `daily tick MSFT --evolution`.
+
 ## Scope
 
 This is a live, research-only workflow for a configurable US equity or ETF
