@@ -33,12 +33,12 @@ def workflow(tmp_path, monkeypatch):
             strategy=Strategy(quick_model=f"candidate-{number}", deep_model="baseline",
                               prompt=BASE_PROMPT + f" Alternative {number}.", tools=list(TOOL_NAMES)),
             summary=f"Candidate {number}", rationale="Distinct hypothesis",
-        ) for number in range(1, 6)])
+        ) for number in range(1, batch.CANDIDATE_COUNT + 1)])
 
     def forecast(strategy, inputs, settings, output):
         assert "target" not in inputs and "lessons" not in inputs
         calls.append((strategy.quick_model, inputs["day"]))
-        close = {"baseline": 102, "candidate-1": 101, "candidate-2": 103,
+        close = {"baseline": 102, "candidate-1": 104, "candidate-2": 103,
                  "candidate-3": 104, "candidate-4": 99, "candidate-5": 102}[strategy.quick_model]
         return DailyForecast(close=close, low=95, high=110, up_probability=0.7,
                              rationale="frozen", risks="uncertain"), {}
@@ -50,21 +50,21 @@ def workflow(tmp_path, monkeypatch):
                            forecast=forecast)
 
 
-def test_five_candidates_use_all_history_and_share_baseline(workflow):
+def test_one_daily_candidate_uses_all_history(workflow):
     flow = workflow
     result = flow.service.run()
-    assert result["status"] == "promoted" and result["best_candidate"] == 3
+    assert result["status"] == "promoted" and result["best_candidate"] == 1
     assert result["dataset"]["mode"] == "all_history"
     assert len(result["dataset"]["test_days"]) == 3
-    assert len(result["candidates"]) == 5
-    assert len(flow.calls) == 18
+    assert len(result["candidates"]) == 1
+    assert len(flow.calls) == 6
     assert sum(model == "baseline" for model, _ in flow.calls) == 3
-    for number in range(1, 6):
+    for number in range(1, batch.CANDIDATE_COUNT + 1):
         assert sum(model == f"candidate-{number}" for model, _ in flow.calls) == 3
     assert flow.store.samples()[0]["used_by"] == "2026-11-09"
     assert flow.store.samples()[1]["used_by"] is None
     assert flow.store.champion()["id"] == result["candidate_version"]
-    assert flow.service.run() == result and len(flow.calls) == 18
+    assert flow.service.run() == result and len(flow.calls) == 6
 
 
 def test_batch_retry_skips_successes_and_does_not_regenerate_candidates(workflow, monkeypatch):
@@ -74,29 +74,29 @@ def test_batch_retry_skips_successes_and_does_not_regenerate_candidates(workflow
         status_code = 429
 
     def limited(strategy, *args):
-        if strategy.quick_model == "candidate-2":
+        if strategy.quick_model == "candidate-1":
             raise RateLimitError("limited")
         return flow.forecast(strategy, *args)
 
     monkeypatch.setattr(runner, "forecast", limited)
     initial = flow.service.run()
     assert initial["status"] == "retry_wait"
-    assert len(flow.calls) == 6
-    assert flow.service.recover()["status"] == "retry_wait" and len(flow.calls) == 6
+    assert len(flow.calls) == 1
+    assert flow.service.recover()["status"] == "retry_wait" and len(flow.calls) == 1
     flow.now[0] += timedelta(minutes=15)
     monkeypatch.setattr(runner, "forecast", flow.forecast)
     result = flow.service.recover()
     assert result["status"] == "promoted"
-    assert len(flow.calls) == 18 and len(flow.proposals) == 1
-    assert len(set(flow.calls)) == 18
+    assert len(flow.calls) == 6 and len(flow.proposals) == 1
+    assert len(set(flow.calls)) == 6
 
 
-def test_batch_proposals_must_be_five_and_distinct(workflow):
+def test_batch_proposals_must_contain_exactly_one_candidate(workflow):
     proposals = workflow.service.propose_batch({}, []).proposals
     with pytest.raises(ValueError):
-        batch.ProposalBatch(proposals=proposals[:4])
+        batch.ProposalBatch(proposals=[])
     with pytest.raises(ValueError):
-        batch.ProposalBatch(proposals=[proposals[0]] * 5)
+        batch.ProposalBatch(proposals=[proposals[0]] * 2)
 
 
 def test_worse_candidates_never_promote(workflow, monkeypatch):
@@ -111,7 +111,7 @@ def test_worse_candidates_never_promote(workflow, monkeypatch):
     result = flow.service.run()
     assert result["status"] == "rejected"
     assert flow.store.champion()["id"] == result["parent_version"]
-    assert len(result["candidates"]) == 5
+    assert len(result["candidates"]) == 1
 
 
 def test_direction_beats_smaller_mae_across_candidates(workflow, monkeypatch):
@@ -119,13 +119,13 @@ def test_direction_beats_smaller_mae_across_candidates(workflow, monkeypatch):
 
     def forecast(strategy, inputs, settings, output):
         flow.calls.append((strategy.quick_model, inputs["day"]))
-        close = 130 if strategy.quick_model == "candidate-4" else 99
+        close = 130 if strategy.quick_model == "candidate-1" else 99
         return DailyForecast(close=close, low=90, high=140, up_probability=0.7,
                              rationale="test", risks="test"), {}
 
     monkeypatch.setattr(runner, "forecast", forecast)
     result = flow.service.run()
-    assert result["status"] == "promoted" and result["best_candidate"] == 4
+    assert result["status"] == "promoted" and result["best_candidate"] == 1
     assert result["backtest"]["candidate"]["mae"] > result["backtest"]["current"]["mae"]
 
 
@@ -141,7 +141,76 @@ def test_new_sample_is_in_next_day_full_history_not_a_holdout(workflow):
     assert len(result["dataset"]["test_days"]) == 4
     assert result["dataset"]["mode"] == "all_history"
     assert result["parent_version"] == first["candidate_version"]
-    assert result["expected_analyses"] == 24
+    assert result["expected_analyses"] == 8
+    assert result["cached_analyses"] == 3
+    assert len(flow.calls) == 11
+
+
+def test_same_version_and_history_reuse_promoted_predictions_across_days(workflow):
+    flow = workflow
+    first = flow.service.run()
+    promoted = deepcopy(first["candidates"][0])
+    flow.now[0] += timedelta(days=1)
+    second = flow.service.run()
+    assert second["parent_version"] == first["candidate_version"]
+    assert second["dataset"]["manifest_hash"] == first["dataset"]["manifest_hash"]
+    assert second["cached_analyses"] == 3
+    assert second["backtest"]["current"] == promoted["backtest"]["candidate"]
+    assert [item["prediction"] for item in second["baseline_attempts"]] == [
+        item["prediction"] for item in promoted["attempts"] if item["variant"] == "candidate"
+    ]
+    assert len(flow.calls) == 9
+
+
+def test_changed_replay_settings_do_not_reuse_prior_predictions(workflow):
+    flow = workflow
+    flow.service.run()
+    flow.now[0] += timedelta(days=1)
+    flow.service.config["max_debate_rounds"] += 1
+    second = flow.service.run()
+    assert second["cached_analyses"] == 0
+    assert len(flow.calls) == 12
+
+
+def test_replay_cache_is_immutable_and_keyed_by_all_execution_inputs(workflow):
+    flow = workflow
+    flow.service.run()
+    with flow.store.connect() as database:
+        row = database.execute("SELECT identity,prediction FROM replay_results LIMIT 1").fetchone()
+    import json
+
+    identity = json.loads(row["identity"])
+    original = json.loads(row["prediction"])
+    assert not flow.store.save_replay_result(identity, {**original, "close": 999}, "later", "current")
+    assert flow.store.replay_result(identity)["prediction"] == original
+    for key in ("version", "strategy_hash", "input_hash", "replay_signature", "repeat"):
+        changed = {**identity, key: "changed"}
+        assert flow.store.replay_result(changed) is None
+
+
+def test_import_prefers_original_promotion_predictions_over_later_random_replays(workflow):
+    flow = workflow
+    first = flow.service.run()
+    winning = first["candidates"][0]
+    later = {**deepcopy(first), "day": "2026-11-13", "status": "rejected",
+             "parent_version": first["candidate_version"], "previous_strategy": first["strategy"],
+             "candidates": [], "baseline_attempts": [
+                 {**deepcopy(item), "variant": "current", "prediction": {**item["prediction"], "close": 99}}
+                 for item in winning["attempts"] if item["variant"] == "candidate"
+             ]}
+    flow.store.save_run(later)
+    with flow.store.connect() as database:
+        database.execute("DELETE FROM replay_results")
+        database.execute("DELETE FROM replay_imports")
+    batch.import_replay_results(flow.store, first["replay_signature"])
+    for item in winning["attempts"]:
+        if item["variant"] != "candidate":
+            continue
+        identity = batch.replay_identity(first["candidate_version"], first["strategy"], item["input_hash"],
+                                         first["replay_signature"], item["repeat"])
+        saved = flow.store.replay_result(identity)
+        assert saved["prediction"] == item["prediction"]
+        assert saved["source_day"] == first["day"]
 
 
 def test_migration_archives_old_run_and_preserves_samples(workflow):
@@ -155,18 +224,18 @@ def test_migration_archives_old_run_and_preserves_samples(workflow):
     assert flow.store.samples()[0]["used_by"] == "2026-11-09"
 
 
-def test_dashboard_exposes_all_five_candidate_results_without_predictions(workflow):
+def test_dashboard_exposes_daily_candidate_results_without_predictions(workflow):
     from tradingagents.evolution.dashboard import snapshot
 
     flow = workflow
     flow.service.run()
     result = snapshot(flow.store)
     record = result["history"]["items"][0]
-    assert len(record["candidates"]) == 5
-    assert record["expected_analyses"] == 18
-    assert record["completed_analyses"] == 18
+    assert len(record["candidates"]) == 1
+    assert record["expected_analyses"] == 6
+    assert record["completed_analyses"] == 6
     assert "attempts" not in record["candidates"][0]
-    assert record["candidates"][2]["status"] == "better"
+    assert record["candidates"][0]["status"] == "better"
 
 
 def test_unlabelled_or_future_outcomes_are_excluded_from_all_history(workflow):
@@ -183,22 +252,23 @@ def test_unlabelled_or_future_outcomes_are_excluded_from_all_history(workflow):
     assert "2026-11-13" not in result["dataset"]["test_days"]
 
 
-def test_one_failed_candidate_does_not_repeat_or_discard_other_candidates(workflow, monkeypatch):
+def test_failed_daily_candidate_does_not_promote(workflow, monkeypatch):
     flow = workflow
 
     class InvalidRequestError(Exception):
         status_code = 400
 
     def failed(strategy, *args):
-        if strategy.quick_model == "candidate-3":
+        if strategy.quick_model == "candidate-1":
             raise InvalidRequestError("unavailable model")
         return flow.forecast(strategy, *args)
 
     monkeypatch.setattr(runner, "forecast", failed)
     result = flow.service.run()
-    assert result["status"] == "promoted" and result["best_candidate"] == 2
-    assert result["candidates"][2]["status"] == "failed"
-    assert len(flow.calls) == len(set(flow.calls)) == 15
+    assert result["status"] == "failed"
+    assert result["candidates"][0]["status"] == "failed"
+    assert flow.store.champion()["id"] == result["parent_version"]
+    assert len(flow.calls) == len(set(flow.calls)) == 1
 
 
 def test_pending_batch_does_not_expand_when_new_label_arrives(workflow, monkeypatch):
@@ -217,7 +287,7 @@ def test_pending_batch_does_not_expand_when_new_label_arrives(workflow, monkeypa
     monkeypatch.setattr(runner, "forecast", flow.forecast)
     result = flow.service.recover()
     assert result["dataset"] == initial["dataset"]
-    assert len(flow.calls) == 18
+    assert len(flow.calls) == 6
 
 
 def test_candidate_previews_fit_api_limit_and_leave_full_audit_intact(workflow):

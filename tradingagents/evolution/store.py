@@ -40,6 +40,14 @@ class EvolutionStore:
                     CREATE TABLE IF NOT EXISTS archived_runs (
                         id TEXT PRIMARY KEY, day TEXT NOT NULL, payload TEXT NOT NULL
                     );
+                    CREATE TABLE IF NOT EXISTS replay_results (
+                        cache_key TEXT PRIMARY KEY, identity TEXT NOT NULL,
+                        prediction TEXT NOT NULL, source_day TEXT NOT NULL,
+                        source_variant TEXT NOT NULL
+                    );
+                    CREATE TABLE IF NOT EXISTS replay_imports (
+                        replay_signature TEXT PRIMARY KEY
+                    );
                 """)
 
     @contextmanager
@@ -114,6 +122,22 @@ class EvolutionStore:
             row = db.execute("SELECT strategy FROM versions WHERE id=?", (version_id,)).fetchone()
         return json.loads(row["strategy"]) if row else None
 
+    def replay_result(self, identity: dict) -> dict | None:
+        with self.connect() as db:
+            row = db.execute("SELECT * FROM replay_results WHERE cache_key=?", (digest(identity),)).fetchone()
+        if not row:
+            return None
+        if row["identity"] != canonical(identity):
+            raise ValueError("Replay cache identity mismatch")
+        return {"prediction": json.loads(row["prediction"]),
+                "source_day": row["source_day"], "source_variant": row["source_variant"]}
+
+    def save_replay_result(self, identity: dict, prediction: dict, source_day: str, source_variant: str) -> bool:
+        with self.connect() as db:
+            cursor = db.execute("INSERT OR IGNORE INTO replay_results VALUES (?,?,?,?,?)",
+                                (digest(identity), canonical(identity), canonical(prediction), source_day, source_variant))
+            return cursor.rowcount == 1
+
     def promote(self, version_id: str):
         with self.connect() as db:
             if not db.execute("SELECT id FROM versions WHERE id=?", (version_id,)).fetchone():
@@ -154,7 +178,7 @@ class EvolutionStore:
                     continue
                 db.execute("INSERT OR IGNORE INTO archived_runs VALUES (?,?,?)",
                            (hashlib.sha256(row["payload"].encode()).hexdigest(), row["day"], row["payload"]))
-                record.update(status="superseded", gate_reason="已切换为每日五候选、全历史回测规则；旧任务结果保留，不再续跑。")
+                record.update(status="superseded", gate_reason="已切换为每日一候选、固定历史预测规则；旧任务结果保留，不再续跑。")
                 db.execute("UPDATE runs SET payload=? WHERE day=?", (canonical(record), row["day"]))
 
     def finish(self, record: dict, *, promote: str | None = None):

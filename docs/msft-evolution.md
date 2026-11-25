@@ -6,8 +6,8 @@ news, fundamentals, research, trader and risk graph. Social data is excluded
 because its separate fetch path is not replayable. It does not change model
 weights, arbitrary source code, evaluation rules or trading permissions.
 
-Current policy: **five distinct candidates per day, backtested on all archived,
-labelled history, with no development/test split** (`all-history-five-v1`).
+Current policy: **one candidate per day, backtested on all archived,
+labelled history, with no development/test split** (`all-history-one-v2`).
 In-sample improvement is sufficient for promotion; it does not prove future skill.
 
 ## Commands and schedule
@@ -52,7 +52,7 @@ restart. A database lock and a New York calendar-day key prevent duplicate
 evolution. A separate recovery timer checks unfinished analyses every fifteen
 minutes. Services have bounded execution time; successful analyses survive a
 process exit and are not rerun. The nightly tick creates or resumes today's
-five-candidate batch. The recovery service resumes older unfinished batches.
+single-candidate batch. The recovery service resumes unfinished current-policy batches.
 Work is serialized by the MSFT lock; provider limits or long evaluations can
 make completion spill into later days.
 Provider failures are recorded without exposing credentials in the dashboard.
@@ -62,7 +62,7 @@ without replacing generated candidates or successful predictions.
 
 For a batch with existing candidates, use `evolution recover`, or
 `evolution recover --day YYYY-MM-DD`, through the recovery service. The original
-five candidates, baseline, models, complete session list and outcome manifest are
+candidate, baseline, models, complete session list and outcome manifest are
 validated and retained. Completed analyses are keyed by session, repetition and
 variant. Recovery rebuilds paired scores from those saved predictions and runs
 only missing analyses. It never regenerates valid candidates or changes the
@@ -128,19 +128,45 @@ no reserved test set, five-new-session wait, or exclusion of previously used
 samples. A new session joins the next batch; running/recovering batches retain
 their original manifest so all versions see exactly the same data.
 
-Five distinct candidates are proposed in one structured call. Each may change
-approved quick/deep models, a general prompt, and the allowed tool subset.
-The baseline and each candidate are evaluated once per session by default
-(`--repeats` accepts 1-5). Baseline predictions are shared across all five
-comparisons, not rerun five times. Each candidate is ranked by direction accuracy
-then MAE; the best complete candidate replaces the baseline only if strictly better.
+One candidate is proposed in one structured call. It may change approved
+quick/deep models, a general prompt, and the allowed tool subset.
+The baseline and candidate have one prediction per session by default
+(`--repeats` accepts 1-5). The candidate is ranked by direction accuracy
+then MAE and replaces the baseline only if strictly better.
 A permanently failed candidate is recorded and excluded from ranking, not scored
 as a success. The previous champion remains if no candidate improves.
 
-For N historical sessions and R repetitions, a complete batch performs
-**6 x N x R full graph analyses**, plus one proposal call. For example, 22 sessions
-with the default single repetition require 132 analyses. Cost grows with history;
-these are real paid provider calls. Progress is persisted after each success.
+For N historical sessions and R repetitions, a completely uncached batch needs
+at most **2 x N x R full graph analyses**, plus one proposal call. For example,
+22 sessions need at most 44 analyses; with the baseline already cached, a new
+candidate normally needs only 22. These are real paid provider calls.
+Progress is persisted after each success.
+
+## Stable historical predictions
+
+LLM generation is stochastic, even with frozen source data; a version is not a
+deterministic formula. Previously each day's baseline was regenerated, so its
+historical accuracy could change on the same closed-market dataset. The current
+policy uses an immutable first-success ledger, keyed by version ID, strategy
+hash, input hash, replay-source/settings signature and repetition number.
+Unchanged versions reuse their exact stored predictions across days and roles
+(a promoted candidate becomes the next baseline). New samples or changed
+versions/settings require new predictions. Targets and scores are not cached
+as model inputs; scoring still uses the frozen outcome separately.
+
+On migration, compatible predictions used by completed promotions take priority,
+then the earliest compatible successful observations. Later stochastic replays
+do not overwrite these canonical predictions. Original run scores and dates
+remain unchanged for audit. The dashboard identifies the baseline version,
+actual start/completion times and the number of reused predictions. The New York
+run date is not the promotion timestamp: a multi-day batch may have started
+before an earlier batch's promotion and therefore compare against an older baseline.
+
+This stabilizes the reported historical benchmark and saves calls; it does not
+make the underlying model deterministic, prove repeatable predictive skill, or
+remove selection bias from a lucky original run. A provider may also change the
+weights behind a model alias without changing its name; the cache cannot detect
+that silent provider-side change.
 
 Version selection uses **direction accuracy first, then MAE only to break ties**
 (`direction_then_mae_v2`):
@@ -170,14 +196,14 @@ database transaction; the next MSFT forecast loads the new champion.
 Each attempt creates `rsi-msft/YYYY-MM-DD` using Git plumbing without checking
 out a branch or including uncommitted work. `rsi-msft.json` in that branch
 contains versioned policy, summary, rationale, data hashes, predictions and
-results, plus all five candidate definitions and their individual scores.
+results, plus the candidate definition and its scores.
 Raw vendor data remains outside Git in
 SQLite. Commit source changes normally before production use; the executor hash
 detects the actual Python sources but does not substitute for committing them.
 
 The stock-miniapp **MSFT 进化** tab reads this store through an authenticated,
 read-only API, with five attempts per page. It displays model/prompt/tool
-differences for all five candidates, metrics, selected winner, branch/commit and
+differences for the daily candidate, metrics, selected winner, branch/commit and
 per-sample errors. Old records retain their original selection rules. Viewing
 it neither launches jobs nor consumes manual-analysis quota. The mini-program
 still needs its normal WeChat Developer Tools upload/release to reach users.

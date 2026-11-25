@@ -399,8 +399,19 @@ class EvolutionRunner:
                         self.store.save_run(record)
                         logger.info("Run %s %s round %s; %s/%s complete", inputs["day"], label, repeat + 1,
                                     len(cached), len(expected_keys))
+                        cache_source = None
                         try:
-                            prediction, _ = forecast(strategy, inputs, self.config, directory)
+                            loader = getattr(self.store, "load_prediction", None)
+                            if loader:
+                                cache_source = loader(strategy, sample["input_hash"], repeat, label)
+                            if cache_source:
+                                prediction = DailyForecast.model_validate(cache_source["prediction"])
+                                logger.info("Reuse frozen version prediction from %s", cache_source["source_day"])
+                            else:
+                                prediction, _ = forecast(strategy, inputs, self.config, directory)
+                                saver = getattr(self.store, "save_prediction", None)
+                                if saver:
+                                    saver(strategy, sample["input_hash"], repeat, label, prediction.model_dump())
                         except Exception as exc:
                             errors = record.setdefault("analysis_errors", [])
                             count = 1 + sum((item["day"], item["repeat"], item["variant"]) == key for item in errors)
@@ -416,6 +427,9 @@ class EvolutionRunner:
                         attempt = {"day": inputs["day"], "repeat": repeat,
                                    "variant": label, "input_hash": sample["input_hash"],
                                    "prediction": prediction.model_dump()}
+                        if cache_source:
+                            attempt.update(cache_hit=True, source_day=cache_source["source_day"],
+                                           source_variant=cache_source["source_variant"])
                         record.setdefault("attempts", []).append(attempt)
                         cached[key] = attempt
                         record.pop("next_retry_at", None)

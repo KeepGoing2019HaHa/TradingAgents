@@ -8,7 +8,7 @@ from pathlib import Path
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from tradingagents.daily.market import MARKET_ZONE
-from tradingagents.daily.models import timestamp, utc_now
+from tradingagents.daily.models import DailyForecast, timestamp, utc_now
 from tradingagents.evolution.branches import archive_branch
 from tradingagents.evolution.engine import (
     Proposal,
@@ -26,9 +26,55 @@ from tradingagents.evolution.retries import (
 from tradingagents.evolution.runner import EvolutionRunner, prompt_json, proposal_input
 from tradingagents.evolution.store import EvolutionStore, digest
 
-POLICY = "all-history-five-v1"
-CANDIDATE_COUNT = 5
+POLICY = "all-history-one-v2"
+CANDIDATE_COUNT = 1
 logger = logging.getLogger(__name__)
+
+
+def replay_identity(version: str, strategy: dict, input_hash: str, signature: str, repeat: int) -> dict:
+    return {"version": version, "strategy_hash": digest(strategy), "input_hash": input_hash,
+            "replay_signature": signature, "repeat": repeat}
+
+
+def import_replay_results(store: EvolutionStore, signature: str) -> int:
+    with store.connect() as db:
+        if db.execute("SELECT 1 FROM replay_imports WHERE replay_signature=?", (signature,)).fetchone():
+            return 0
+        rows = db.execute("SELECT payload FROM runs UNION ALL SELECT payload FROM archived_runs").fetchall()
+    import json
+
+    records = sorted((json.loads(row["payload"]) for row in rows), key=lambda record: record["day"])
+    samples = {sample["inputs"]["day"]: sample for sample in store.samples()}
+    inserted = 0
+
+    def save_attempt(record, version, strategy, attempt):
+        nonlocal inserted
+        sample = samples.get(attempt["day"])
+        if not sample or sample["input_hash"] != attempt["input_hash"]:
+            return
+        if store.strategy(version) != strategy:
+            return
+        prediction = DailyForecast.model_validate(attempt["prediction"])
+        identity = replay_identity(version, strategy, attempt["input_hash"], signature, attempt["repeat"])
+        inserted += store.save_replay_result(identity, prediction.model_dump(), record["day"], attempt["variant"])
+
+    for promoted_only in (True, False):
+        for record in records:
+            if record.get("replay_signature") != signature:
+                continue
+            for candidate in record.get("candidates", []):
+                winner = record["status"] == "promoted" and record.get("candidate_version") == candidate.get("candidate_version")
+                if promoted_only and not winner:
+                    continue
+                for attempt in candidate.get("attempts", []):
+                    if attempt["variant"] == "candidate":
+                        save_attempt(record, candidate["candidate_version"], candidate["strategy"], attempt)
+            if not promoted_only:
+                for attempt in record.get("baseline_attempts", []):
+                    save_attempt(record, record["parent_version"], record["previous_strategy"], attempt)
+    with store.connect() as db:
+        db.execute("INSERT OR IGNORE INTO replay_imports VALUES (?)", (signature,))
+    return inserted
 
 
 class ProposalBatch(BaseModel):
@@ -38,7 +84,7 @@ class ProposalBatch(BaseModel):
     @model_validator(mode="after")
     def distinct_strategies(self):
         if len({digest(item.strategy.model_dump()) for item in self.proposals}) != CANDIDATE_COUNT:
-            raise ValueError("Five distinct candidate strategies are required")
+            raise ValueError("Exactly one candidate strategy is required")
         return self
 
 
@@ -46,6 +92,17 @@ class CandidateStore:
     def __init__(self, store: EvolutionStore, batch: dict, candidate: dict):
         self.store, self.batch, self.candidate = store, batch, candidate
         self.path = store.path
+
+    def identity(self, strategy: Strategy, input_hash: str, repeat: int, variant: str) -> dict:
+        version = self.candidate["parent_version"] if variant == "current" else self.candidate["candidate_version"]
+        return replay_identity(version, strategy.model_dump(), input_hash, self.batch["replay_signature"], repeat)
+
+    def load_prediction(self, strategy: Strategy, input_hash: str, repeat: int, variant: str) -> dict | None:
+        return self.store.replay_result(self.identity(strategy, input_hash, repeat, variant))
+
+    def save_prediction(self, strategy: Strategy, input_hash: str, repeat: int, variant: str, prediction: dict):
+        identity = self.identity(strategy, input_hash, repeat, variant)
+        self.store.save_replay_result(identity, prediction, self.batch["day"], variant)
 
     def save_run(self, record: dict):
         baseline_results = {(item["day"], item["repeat"]): item for item in self.batch["baseline_attempts"]}
@@ -59,6 +116,7 @@ class CandidateStore:
             if item["variant"] == "candidate"
         ]]
         self.batch["completed_pairs"] = sum(len(item.get("pairs", [])) for item in self.batch["candidates"])
+        self.batch["cached_analyses"] = sum(bool(item.get("cache_hit")) for item in self.batch["attempts"])
         active = record.get("active_analysis")
         if active:
             self.batch["active_analysis"] = {**active, "candidate_number": record["number"]}
@@ -80,7 +138,7 @@ class AllHistoryRunner(EvolutionRunner):
                         {champion["strategy"]["quick_model"], champion["strategy"]["deep_model"],
                          self.config["quick_think_llm"], self.config["deep_think_llm"]})
         header = (
-            "Propose exactly FIVE distinct MSFT forecasting strategies, all different from the baseline. "
+            "Propose exactly ONE MSFT forecasting strategy, different from the baseline. "
             "Vary approved model selections, general prompt instructions, and allowed tool subsets. "
             "Keep each strategy prompt concise (prefer under 1000 characters). "
             "Optimize direction accuracy first; compare MAE only on a direction-accuracy tie. "
@@ -108,6 +166,7 @@ class AllHistoryRunner(EvolutionRunner):
 
     def run(self, *, retry_failed: bool = False) -> dict:
         with self.store.lock():
+            import_replay_results(self.store, execution_signature(self.config, replay_only=True))
             self.store.supersede_legacy_runs(POLICY)
             now = self.clock()
             day = now.astimezone(MARKET_ZONE).date().isoformat()
@@ -129,13 +188,14 @@ class AllHistoryRunner(EvolutionRunner):
                 "policy": POLICY, "day": day, "ticker": "MSFT", "started_at": timestamp(now),
                 "completed_at": None, "status": "running", "parent_version": champion["id"],
                 "previous_strategy": champion["strategy"], "strategy": champion["strategy"],
-                "summary": "每日五候选 · 全历史回测", "rationale": "方向准确率优先，相同时比较 MAE；无独立测试集。",
+                "summary": "每日一候选 · 全历史回测", "rationale": "方向准确率优先，相同时比较 MAE；无独立测试集。",
                 "dataset": dataset, "candidates": [], "baseline_attempts": [], "attempts": [], "pairs": [],
                 "backtest": None, "candidate_count": CANDIDATE_COUNT,
                 "expected_analyses": len(samples) * self.repeats * (CANDIDATE_COUNT + 1),
                 "execution_settings": execution_settings(self.config),
                 "execution_signature": execution_signature(self.config),
                 "replay_signature": execution_signature(self.config, replay_only=True),
+                "prediction_policy": "immutable-first-success-v1",
             }
             self.store.replace_policy_run(record)
             return self.process(record)
@@ -188,7 +248,7 @@ class AllHistoryRunner(EvolutionRunner):
                 if self.store.strategy(candidate["candidate_version"]) != candidate["strategy"]:
                     raise ValueError("Candidate strategy changed")
                 candidate["status"] = "running"
-                logger.info("Batch %s: candidate %s/5, %s historical sessions", record["day"], candidate["number"], len(samples))
+                logger.info("Batch %s: candidate %s/%s, %s historical sessions", record["day"], candidate["number"], CANDIDATE_COUNT, len(samples))
                 candidate["attempts"] = [*copy.deepcopy(record["baseline_attempts"]),
                                          *[item for item in candidate["attempts"] if item["variant"] == "candidate"]]
                 adapter = CandidateStore(self.store, record, candidate)
@@ -217,7 +277,7 @@ class AllHistoryRunner(EvolutionRunner):
             if record["replay_signature"] != execution_signature(config, replay_only=True):
                 raise ValueError("Replay executor changed before ranking")
             if not completed:
-                record.update(status="failed", gate_reason="五个候选均未完成有效全历史回测；保留原版本。")
+                record.update(status="failed", gate_reason="候选未完成有效全历史回测；保留原版本。")
                 return self.finish_record(record)
             best = max(completed, key=lambda item: (item["backtest"]["candidate"]["direction_accuracy"],
                                                    -item["backtest"]["candidate"]["mae"]))
@@ -257,6 +317,7 @@ class AllHistoryRunner(EvolutionRunner):
 
     def recover(self, *, day: str | None = None) -> dict | None:
         with self.store.lock():
+            import_replay_results(self.store, execution_signature(self.config, replay_only=True))
             records = [self.store.run_record(day)] if day else self.store.pending_runs()
             pending = [item for item in records if item and item.get("policy") == POLICY
                        and item["status"] in {"running", "retry_wait"}]

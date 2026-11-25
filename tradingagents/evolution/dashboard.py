@@ -24,7 +24,7 @@ def snapshot(store: EvolutionStore, *, before: str | None = None) -> dict:
     result = {"ticker": "MSFT", "generated_at": timestamp(utc_now()), "champion": None,
               "summary": {"samples": 0, "labelled": 0, "fresh": 0},
               "history": {"items": [], "next_before": None}}
-    result["summary"]["candidate_count"] = 5
+    result["summary"]["candidate_count"] = 1
     if not store.path.is_file():
         return result
     champion = store.champion()
@@ -34,7 +34,7 @@ def snapshot(store: EvolutionStore, *, before: str | None = None) -> dict:
         counts = db.execute("SELECT COUNT(*) AS samples, COUNT(target) AS labelled, "
                             "COUNT(CASE WHEN target IS NOT NULL AND used_by IS NULL THEN 1 END) AS fresh FROM samples").fetchone()
     result["summary"] = dict(counts)
-    result["summary"]["candidate_count"] = 5
+    result["summary"]["candidate_count"] = 1
     runs = store.runs(before=before, limit=6)
     public_keys = (
         "day", "ticker", "status", "started_at", "completed_at", "parent_version", "candidate_version",
@@ -42,6 +42,7 @@ def snapshot(store: EvolutionStore, *, before: str | None = None) -> dict:
         "branch", "commit", "execution_signature", "error",
         "next_retry_at", "failed_analysis", "recovery_count",
         "policy", "best_candidate", "candidate_count",
+        "cached_analyses", "prediction_policy",
     )
     for record in runs[:5]:
         item = {key: record.get(key) for key in public_keys}

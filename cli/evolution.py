@@ -10,10 +10,10 @@ from filelock import Timeout
 
 from tradingagents.daily.store import DailyStore
 from tradingagents.default_config import DEFAULT_CONFIG
-from tradingagents.evolution.batch import AllHistoryRunner
+from tradingagents.evolution.batch import CANDIDATE_COUNT, AllHistoryRunner
 from tradingagents.evolution.store import EvolutionStore
 
-app = typer.Typer(help="Five MSFT candidates per day, ranked on all frozen labelled history.")
+app = typer.Typer(help="One MSFT candidate per day, evaluated on all frozen labelled history.")
 DATABASE = Path.home() / ".tradingagents" / "daily" / "daily.sqlite3"
 
 
@@ -32,11 +32,12 @@ def tick(
     dry_run: bool = typer.Option(False, "--dry-run"),
     retry_failed: bool = typer.Option(False, "--retry-failed", help="Resume today's pending batch without replacing candidates or successes"),
 ):
-    """Generate five candidates daily and promote the best historical improvement."""
+    """Try one candidate daily; reuse fixed predictions for unchanged history."""
     path = database.expanduser().with_name("evolution.sqlite3")
     if dry_run:
         typer.echo(json.dumps({"ticker": "MSFT", "database": str(path), "minimum_samples": 1,
-                       "candidate_count": 5, "dataset_mode": "all_history", "repeats": repeats,
+                           "candidate_count": CANDIDATE_COUNT, "dataset_mode": "all_history", "repeats": repeats,
+                               "prediction_cache": "immutable-first-success-v1",
                                "schedule": "21:15 America/New_York daily",
                                "branch": "rsi-msft/YYYY-MM-DD", "no_provider_calls": True}, indent=2))
         return
